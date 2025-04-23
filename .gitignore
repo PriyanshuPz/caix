@@ -1,5 +1,8 @@
 # dependencies (bun install)
 node_modules
+uploads/
+
+*.db
 
 # output
 out
