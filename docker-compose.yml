@@ -1,0 +1,29 @@
+services:
+  # app:
+  #   build: .
+  #   volumes:
+  #     - .:/app
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - chroma
+  #     - redis
+
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: youruser
+      POSTGRES_PASSWORD: yourpass
+      POSTGRES_DB: yourdb
+
+  chroma:
+    image: chromadb/chroma
+    ports:
+      - "8000:8000"
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"

@@ -6,7 +6,7 @@ const server = serve({
   development: process.env.NODE_ENV !== "production",
   routes: {
     "/*": index,
-    "/api/file": {
+    "/api/files": {
       POST: Routes.handleFileUpload,
       GET: Routes.handleListFiles,
     },

@@ -4,7 +4,7 @@ import { Menu, Send } from "lucide-react";
 import React, { useState } from "react";
 
 export default function MainContent() {
-  const { toggleSidebar, messages, loading, addMessage } = useGlobalContext();
+  const { toggleSidebar, messages, loading, userSession } = useGlobalContext();
 
   const [inputMessage, setInputMessage] = useState("");
 
@@ -27,7 +27,13 @@ export default function MainContent() {
             </button>
             <h1 className="text-xl font-bold text-primary">Chat</h1>
           </div>
-          <div className="flex items-center text-sm text-muted-foreground"></div>
+          <div className="flex items-center text-sm text-muted-foreground">
+            {userSession ? (
+              <span>{userSession.userId}</span>
+            ) : (
+              <span>Anonymous</span>
+            )}
+          </div>
         </div>
       </header>
 

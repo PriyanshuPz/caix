@@ -1,14 +1,6 @@
-import { Database } from "bun:sqlite";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import * as schema from "./schemas";
 
-// Initialize or open the SQLite database
-export const db = new Database("files.db");
-
-// Create table if not exists
-db.run(`
-  CREATE TABLE IF NOT EXISTS uploads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    path TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+const client = postgres("postgres://youruser:yourpass@localhost:5432/yourdb");
+export const db = drizzle(client, { schema });
