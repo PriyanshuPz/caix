@@ -2,11 +2,12 @@ import { writeFile, mkdir, unlink } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
 import { db } from "./db";
-import { docsSchema, messagesSchema, usersSchema } from "./db/schemas";
+import { docsSchema, messagesSchema } from "./db/schemas";
 import { jobQueue } from "./lib/queue";
 import { eq, and, desc } from "drizzle-orm";
-import mime from "mime-types";
 import crypto from "crypto";
+import { generateText } from "ai";
+import { google } from "@ai-sdk/google";
 
 const UPLOAD_DIR = "./uploads";
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
@@ -37,21 +38,6 @@ export class Routes {
           { status: 400 }
         );
       }
-
-      // Check if user exists
-      // const user = await db
-      //   .select({ id: usersSchema.id })
-      //   .from(usersSchema)
-      //   .where(eq(usersSchema.id, userId))
-      //   .limit(1);
-
-      // // Create user if not exists
-      // if (user.length === 0) {
-      //   await db.insert(usersSchema).values({
-      //     id: userId,
-      //     created_at: new Date().toISOString(),
-      //   });
-      // }
 
       // Validate files
       if (!files.length) {
@@ -113,6 +99,7 @@ export class Routes {
             mime_type: file.type,
             extension: file.name.split(".").pop(),
             status: "pending",
+            jobId: null,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           })
@@ -129,8 +116,8 @@ export class Routes {
         });
 
         // Queue file for processing
-        await jobQueue.add(
-          "processFile",
+        const job = await jobQueue.add(
+          "file-process",
           JSON.stringify({
             fileId: savedFile[0].id,
             userId: userId.toString(),
@@ -144,15 +131,16 @@ export class Routes {
             },
           }
         );
-      }
 
-      // Update user document count
-      // await db.execute(sql`
-      //   UPDATE users
-      //   SET document_count = document_count + ${uploadedFiles.length},
-      //       updated_at = CURRENT_TIMESTAMP
-      //   WHERE id = ${userId}
-      // `);
+        // Update the file record with the job ID
+        await db
+          .update(docsSchema)
+          .set({
+            jobId: job.id,
+          })
+          .where(eq(docsSchema.id, savedFile[0].id));
+        console.log("Files queued for processing:", job.id);
+      }
 
       return Response.json({
         message: "Files uploaded successfully",
@@ -192,9 +180,11 @@ export class Routes {
         })
         .from(docsSchema)
         .where(
+          // Check if the user ID matches and the file is not deleted
           and(
             eq(docsSchema.user_id, userId),
-            eq(docsSchema.status, "processed")
+            // status is not equal to "deleted"
+            sql`${docsSchema.status} != 'deleted'`
           )
         )
         .orderBy(desc(docsSchema.created_at));
@@ -249,6 +239,87 @@ export class Routes {
   }
 
   /**
+   * Retry file processing on failure
+   */
+  static async handleRetryFile(req: Request): Promise<Response> {
+    try {
+      const url = new URL(req.url);
+      const fileId = url.searchParams.get("file_id");
+
+      if (!fileId) {
+        return Response.json({ error: "File ID is required" }, { status: 400 });
+      }
+
+      // Get file info first
+      const file = await db
+        .select({
+          fileId: docsSchema.id,
+          status: docsSchema.status,
+          jobId: docsSchema.jobId,
+          userId: docsSchema.user_id,
+          path: docsSchema.path,
+        })
+        .from(docsSchema)
+        .where(eq(docsSchema.id, fileId))
+        .limit(1);
+
+      if (!file.length) {
+        return Response.json({ error: "File not found" }, { status: 404 });
+      }
+
+      if (file[0].status !== "error") {
+        return Response.json(
+          { error: "File is not in a failed state" },
+          { status: 400 }
+        );
+      }
+      // Check if the job is already in the queue
+      const existingJob = await jobQueue.getJob(file[0].jobId);
+      if (existingJob) {
+        return Response.json(
+          { error: "File is already being processed" },
+          { status: 400 }
+        );
+      }
+      // Retry the job
+      const job = await jobQueue.add(
+        "file-process",
+        JSON.stringify({
+          fileId: file[0].fileId,
+          userId: file[0].userId,
+          filePath: file[0].path,
+        }),
+        {
+          attempts: 3,
+          backoff: {
+            type: "exponential",
+            delay: 1000,
+          },
+        }
+      );
+      // Update the file record with the new job ID
+      await db
+        .update(docsSchema)
+        .set({
+          jobId: job.id,
+          status: "pending",
+          updated_at: new Date().toISOString(),
+        })
+        .where(eq(docsSchema.id, file[0].fileId));
+      console.log("Files queued for processing:", job.id);
+      return Response.json({
+        message: "File processing retried successfully",
+        jobId: job.id,
+      });
+    } catch (error) {
+      console.error("Error retrying file processing:", error);
+      return Response.json(
+        { error: "Failed to retry file processing" },
+        { status: 500 }
+      );
+    }
+  }
+  /**
    * Delete a file
    */
   static async handleDeleteFile(req: Request): Promise<Response> {
@@ -269,6 +340,7 @@ export class Routes {
         .select({
           path: docsSchema.path,
           userId: docsSchema.user_id,
+          jobId: docsSchema.jobId,
         })
         .from(docsSchema)
         .where(eq(docsSchema.id, fileId))
@@ -300,13 +372,13 @@ export class Routes {
         await unlink(file[0].path);
       }
 
-      // Update user document count
-      // await db.execute(sql`
-      //   UPDATE users
-      //   SET document_count = document_count - 1,
-      //       updated_at = CURRENT_TIMESTAMP
-      //   WHERE id = ${userId}
-      // `);
+      // Optionally delete the file from the database
+      // await db.delete(docsSchema).where(eq(docsSchema.id, fileId));
+
+      // Optionally delete job from the queue
+
+      const job = await jobQueue.remove(file[0].jobId);
+      console.log(`Job ${file[0].jobId} removed from the queue`);
 
       return Response.json({
         message: "File deleted successfully",
@@ -346,6 +418,105 @@ export class Routes {
       );
     }
   }
+
+  /**
+   * Chat with document
+   */
+  static async handleChatWithDocument(req: Request): Promise<Response> {
+    try {
+      const { userId, userQuery } = await req.json();
+
+      if (!userId || !userQuery) {
+        return Response.json(
+          { error: "User ID, userQuery are required" },
+          { status: 400 }
+        );
+      }
+
+      const collectionName = `user-docs`;
+      const embeddingModel = "embedding-001";
+
+      const vectorStore = await getVectorStore({
+        collectionName,
+        embeddingModel,
+      });
+
+      const ret = vectorStore.asRetriever({
+        k: 2,
+      });
+      const result = await ret.invoke(userQuery.toString());
+
+      const SYSTEM_PROMPT = `
+You are BOB, a sophisticated personal AI assistant designed for Priyanshu. Respond in a helpful, slightly witty manner similar to how Jarvis would assist Tony Stark.
+
+USER PROFILE:
+- Name: Priyanshu
+- Occupation: Developer
+- Interests: Programming, technology, learning new skills
+- Current projects: Building a personal knowledge management system (CAIX)
+- Learning focus: AI systems, RAG architectures, TypeScript
+
+Context from Priyanshu's personal files:
+${JSON.stringify(result)}
+
+When responding to queries:
+1. Prioritize information from Priyanshu's personal journals, blogs, notes, educational PDFs, and other documents.
+2. Address Priyanshu by name occasionally to personalize the experience.
+3. Reference specific documents naturally (e.g., "According to your journal entry from Tuesday..." or "In that TypeScript tutorial you uploaded...")
+4. When explaining technical concepts from PDFs, connect them to Priyanshu's current projects when relevant.
+5. Maintain a balance between being professional and personal - you're Priyanshu's trusted confidant and technical advisor.
+6. Present information in a clear, organized manner using formatting when appropriate.
+7. If you recognize patterns across multiple documents (like recurring topics in journals or coding notes), tactfully point them out.
+8. Be direct and concise - value Priyanshu's time while still being thorough.
+9. When appropriate, suggest connections between different documents or ideas.
+10. Respect privacy completely - this is Priyanshu's personal system handling confidential information.
+
+For educational content and learning:
+1. Identify key concepts from educational PDFs and materials
+2. Explain complex ideas in simpler terms when asked
+3. Connect concepts to Priyanshu's development work when relevant
+4. Suggest practical applications of theoretical knowledge to CAIX or other projects
+5. Help create summaries and study notes from longer materials
+6. Point out important code snippets, formulas, or methodologies
+7. Answer follow-up questions with additional context from relevant documents
+
+Remember key characteristics:
+- Be helpful but not obsequious
+- Be informative without being pedantic
+- Be personable without being overly familiar
+- Maintain a slight touch of dry wit when appropriate
+- When teaching, be patient and encouraging
+- Reference Priyanshu's interests and projects when relevant
+
+If you don't have enough information from the provided context:
+1. Clearly acknowledge this limitation
+2. Suggest what information might help provide a better answer
+3. Never fabricate information about Priyanshu's personal documents
+
+Your primary purpose is to make Priyanshu's personal information and learning materials more accessible and useful, helping organize thoughts, recall important details, discover insights across personal documents, and facilitate learning from educational content.
+`;
+
+      const { text } = await generateText({
+        model: google("gemini-1.5-flash"),
+        system: SYSTEM_PROMPT,
+        prompt: userQuery,
+      });
+
+      return Response.json({
+        data: {
+          text: text,
+          context: result,
+        },
+      });
+    } catch (error) {
+      console.error("Error sending message:", error);
+      return Response.json(
+        { error: "Failed to send message" },
+        { status: 500 }
+      );
+    }
+  }
 }
 
 import { sql } from "drizzle-orm";
+import { getVectorStore } from "./lib/vector-store";

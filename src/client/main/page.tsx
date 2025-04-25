@@ -1,17 +1,105 @@
 import { useGlobalContext } from "@client/contexts/use-global";
 import { formatTime } from "@client/lib/utils";
 import { Menu, Send } from "lucide-react";
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
+import { v4 as uuidv4 } from "uuid";
 
 export default function MainContent() {
-  const { toggleSidebar, messages, loading, userSession } = useGlobalContext();
+  const {
+    toggleSidebar,
+    messages,
+    addMessage,
+    loading,
+    setLoading,
+    userSession,
+    uploadedDocuments,
+  } = useGlobalContext();
 
   const [inputMessage, setInputMessage] = useState("");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  // Scroll to bottom when messages update
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputMessage.trim()) return;
-    console.log("Sending message:", inputMessage);
+    const messageText = inputMessage.trim();
+    if (!messageText || loading.messages) return;
+
+    // Get current user ID
+    const userId = userSession?.userId;
+    if (!userId) {
+      alert("You need to be logged in to send messages");
+      return;
+    }
+
+    // Create user message and add to state
+    const userMessage = {
+      id: uuidv4(),
+      content: messageText,
+      sender: "user",
+      timestamp: new Date(),
+    };
+
+    addMessage(userMessage);
+    setInputMessage("");
+
+    try {
+      setLoading("messages", true);
+
+      // Send message to API
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          userQuery: messageText,
+          userId: userId,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error: ${response.status}`);
+      }
+
+      const responseData = await response.json();
+
+      // Add assistant message to state
+      const assistantMessage = {
+        id: uuidv4(),
+        content:
+          responseData.data.text || "Sorry, I couldn't process that request.",
+        sender: "assistant",
+        timestamp: new Date(),
+        context: responseData.context || [],
+      };
+
+      addMessage(assistantMessage);
+    } catch (error) {
+      console.error("Error sending message:", error);
+
+      // Add error message
+      addMessage({
+        id: uuidv4(),
+        content:
+          "Sorry, there was an error processing your request. Please try again.",
+        sender: "assistant",
+        timestamp: new Date(),
+      });
+    } finally {
+      setLoading("messages", false);
+    }
+  };
+
+  // Handle Enter key to send message
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage(e as any);
+    }
   };
 
   return (
@@ -29,7 +117,7 @@ export default function MainContent() {
           </div>
           <div className="flex items-center text-sm text-muted-foreground">
             {userSession ? (
-              <span>{userSession.userId}</span>
+              <span>Session: {userSession.userId.slice(0, 8)}...</span>
             ) : (
               <span>Anonymous</span>
             )}
@@ -50,35 +138,38 @@ export default function MainContent() {
             </div>
           </div>
         ) : (
-          messages.map((message) => (
-            <div
-              key={message.id}
-              className={`flex ${
-                message.sender === "user" ? "justify-end" : "justify-start"
-              }`}
-            >
+          <>
+            {messages.map((message) => (
               <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-md ${
-                  message.sender === "user"
-                    ? "bg-primary text-primary-foreground rounded-br-none"
-                    : "bg-secondary text-secondary-foreground rounded-bl-none border border-border/50"
+                key={message.id}
+                className={`flex ${
+                  message.sender === "user" ? "justify-end" : "justify-start"
                 }`}
               >
-                <div className="text-sm whitespace-pre-wrap">
-                  {message.content}
-                </div>
                 <div
-                  className={`text-xs mt-1 text-right ${
+                  className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-md ${
                     message.sender === "user"
-                      ? "text-primary-foreground/70"
-                      : "text-muted-foreground"
+                      ? "bg-primary text-primary-foreground rounded-br-none"
+                      : "bg-secondary text-secondary-foreground rounded-bl-none border border-border/50"
                   }`}
                 >
-                  {formatTime(message.timestamp)}
+                  <div className="text-sm whitespace-pre-wrap">
+                    {message.content}
+                  </div>
+                  <div
+                    className={`text-xs mt-1 text-right ${
+                      message.sender === "user"
+                        ? "text-primary-foreground/70"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {formatTime(message.timestamp)}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))
+            ))}
+            <div ref={messagesEndRef} />
+          </>
         )}
         {loading.messages && (
           <div className="flex justify-start">
@@ -101,7 +192,8 @@ export default function MainContent() {
               type="text"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              placeholder="Type a message..."
+              onKeyDown={handleKeyDown}
+              placeholder="Ask about your documents..."
               className="w-full bg-secondary border border-border rounded-full px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring placeholder-muted-foreground"
             />
           </div>

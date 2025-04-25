@@ -9,6 +9,10 @@ const server = serve({
     "/api/files": {
       POST: Routes.handleFileUpload,
       GET: Routes.handleListFiles,
+      DELETE: Routes.handleDeleteFile,
+    },
+    "/api/chat": {
+      POST: Routes.handleChatWithDocument,
     },
   },
 });

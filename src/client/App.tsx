@@ -15,7 +15,7 @@ export default function App() {
           <Sidebar />
           <MainContent />
         </div>
-        <Toaster position="top-right" richColors />
+        <Toaster position="top-right" richColors closeButton />
       </GlobalProvider>
     </QueryClientProvider>
   );

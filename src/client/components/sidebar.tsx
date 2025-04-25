@@ -67,7 +67,7 @@ export default function Sidebar() {
       });
       formData.append("user_id", userId);
 
-      const res = await fetch("/api/file", {
+      const res = await fetch("/api/files", {
         method: "POST",
         body: formData,
       });
@@ -105,7 +105,7 @@ export default function Sidebar() {
       if (!userId) throw new Error("User session not found");
 
       const response = await fetch(
-        `/api/file?file_id=${id}&user_id=${userId}`,
+        `/api/files?file_id=${id}&user_id=${userId}`,
         {
           method: "DELETE",
         }

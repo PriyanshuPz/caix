@@ -25,6 +25,7 @@ export const docsSchema = pgTable("files", {
   chunk_count: integer("chunk_count"),
   collection: text("collection"), // Vector store collection name
   error_message: text("error_message"),
+  jobId: text("job_id"), // For tracking processing jobs
 
   // Embedding information
   embedding_model: text("embedding_model"),

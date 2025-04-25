@@ -1,12 +1,11 @@
 import { Worker } from "bullmq";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { DocxLoader } from "@langchain/community/document_loaders/fs/docx";
-// import { TextLoader } from "@langchain/community/document_loaders/fs/text";
 import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
-// import { JSONLoader } from "@langchain/community/document_loaders/fs/json";
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { Chroma } from "@langchain/community/vectorstores/chroma";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+import { QdrantVectorStore } from "@langchain/qdrant";
 import { Document } from "langchain/document";
 import fs from "fs";
 import path from "path";
@@ -14,9 +13,9 @@ import crypto from "crypto";
 import mime from "mime-types";
 import { db } from "./db";
 import { docsSchema } from "./db/schemas";
-import { eq, sql } from "drizzle-orm";
-
-const QUEUE_NAME = "processFile";
+import { eq } from "drizzle-orm";
+import { FILE_PROCESS_QUEUE } from "@/comman/constants";
+import { getVectorStore } from "./lib/vector-store";
 
 // Constants for text splitting
 const CHUNK_SIZE = 1000;
@@ -54,7 +53,7 @@ const getLoader = (filePath: string) => {
 
 // Main worker definition
 const worker = new Worker(
-  QUEUE_NAME,
+  FILE_PROCESS_QUEUE,
   async (job) => {
     const { fileId, userId, filePath } = JSON.parse(job.data);
     console.log(`Processing file ${fileId} for user ${userId}`);
@@ -121,25 +120,14 @@ const worker = new Worker(
         });
       });
 
-      // Initialize embeddings with API key
-      const apiKey = Bun.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Missing GEMINI_API_KEY environment variable");
-      }
-
-      const embeddingModel = "gemini-embedding-exp-03-07";
-      const embeddings = new GoogleGenerativeAIEmbeddings({
-        model: embeddingModel,
-        apiKey,
-      });
-
       // Set up collection name with user ID for isolation
-      const collectionName = `user-${userId}-docs`;
+      const collectionName = `user-docs`;
+      const embeddingModel = "embedding-001";
 
       // Initialize vector store
-      const vectorStore = new Chroma(embeddings, {
+      const vectorStore = await getVectorStore({
         collectionName,
-        url: Bun.env.CHROMA_URL || "http://localhost:8000",
+        embeddingModel,
       });
 
       // Add documents to vector store with metadata
@@ -158,14 +146,6 @@ const worker = new Worker(
           error_message: null, // Clear any previous errors
         })
         .where(eq(docsSchema.id, fileId));
-
-      // Update user document count
-      // await db.execute(sql`
-      //   UPDATE users
-      //   SET document_count = document_count + 1,
-      //       updated_at = CURRENT_TIMESTAMP
-      //   WHERE id = ${userId}
-      // `);
 
       console.log(
         `File ${fileId} processed successfully with ${processedDocs.length} chunks`
@@ -198,7 +178,6 @@ const worker = new Worker(
     connection: {
       host: Bun.env.REDIS_HOST || "localhost",
       port: parseInt(Bun.env.REDIS_PORT || "6379"),
-      password: Bun.env.REDIS_PASSWORD,
     },
     removeOnComplete: {
       age: 24 * 60 * 60, // Keep completed jobs for 1 day
@@ -209,6 +188,10 @@ const worker = new Worker(
     },
   }
 );
+
+worker.on("stalled", (job) => {
+  console.warn(`Job ${job} has stalled`);
+});
 
 // Handle worker events
 worker.on("completed", (job) => {
@@ -229,17 +212,35 @@ worker.on("error", (err) => {
   console.error("Worker error:", err);
 });
 
-// Graceful shutdown
-process.on("SIGTERM", async () => {
-  console.info("Worker shutting down");
-  await worker.close();
-  process.exit(0);
-});
-
-process.on("SIGINT", async () => {
-  console.info("Worker shutting down");
-  await worker.close();
-  process.exit(0);
-});
-
 export default worker;
+// import { Queue } from "bullmq";
+
+// // Create a helper function to check jobs in queue
+// async function checkQueueStatus() {
+//   const queue = new Queue(QUEUE_NAME, {
+//     connection: {
+//       host: Bun.env.REDIS_HOST || "localhost",
+//       port: parseInt(Bun.env.REDIS_PORT || "6379"),
+//     },
+//   });
+
+//   // Get counts
+//   const waiting = await queue.getWaitingCount();
+//   const active = await queue.getActiveCount();
+//   const completed = await queue.getCompletedCount();
+//   const failed = await queue.getFailedCount();
+
+//   console.log(
+//     `Queue status - Waiting: ${waiting}, Active: ${active}, Completed: ${completed}, Failed: ${failed}`
+//   );
+
+//   // Get actual job data if needed
+//   const waitingJobs = await queue.getWaiting();
+//   console.log(
+//     "Waiting jobs:",
+//     waitingJobs.map((job) => ({ id: job.id, data: job.data }))
+//   );
+// }
+
+// // Call this function to debug
+// checkQueueStatus().catch(console.error);
