@@ -3,13 +3,12 @@ import { join } from "path";
 import { existsSync } from "fs";
 import { db } from "./db";
 import { docsSchema, messagesSchema } from "./db/schemas";
-import { jobQueue } from "./lib/queue";
+import { queue } from "./lib/queue";
 import { eq, and, desc } from "drizzle-orm";
 import crypto from "crypto";
 import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
 
-const UPLOAD_DIR = "./uploads";
 const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
 const ALLOWED_FILE_TYPES = [
   "application/pdf",
@@ -92,14 +91,13 @@ export class Routes {
           .insert(docsSchema)
           .values({
             id: fileId,
-            name: file.name,
+            name: file.name.split(".")[0],
             path: filepath,
             size: file.size,
             user_id: userId.toString(),
             mime_type: file.type,
             extension: file.name.split(".").pop(),
             status: "pending",
-            jobId: null,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           })
@@ -115,31 +113,15 @@ export class Routes {
           type: file.type,
         });
 
-        // Queue file for processing
-        const job = await jobQueue.add(
-          "file-process",
-          JSON.stringify({
-            fileId: savedFile[0].id,
-            userId: userId.toString(),
-            filePath: filepath,
-          }),
-          {
-            attempts: 3,
-            backoff: {
-              type: "exponential",
-              delay: 1000,
-            },
-          }
-        );
-
-        // Update the file record with the job ID
-        await db
-          .update(docsSchema)
-          .set({
-            jobId: job.id,
+        queue.add(() =>
+          retry(async () => {
+            await processFile({
+              fileId: savedFile[0].id,
+              userId: userId.toString(),
+              filePath: filepath,
+            });
           })
-          .where(eq(docsSchema.id, savedFile[0].id));
-        console.log("Files queued for processing:", job.id);
+        );
       }
 
       return Response.json({
@@ -255,7 +237,6 @@ export class Routes {
         .select({
           fileId: docsSchema.id,
           status: docsSchema.status,
-          jobId: docsSchema.jobId,
           userId: docsSchema.user_id,
           path: docsSchema.path,
         })
@@ -274,42 +255,42 @@ export class Routes {
         );
       }
       // Check if the job is already in the queue
-      const existingJob = await jobQueue.getJob(file[0].jobId);
-      if (existingJob) {
-        return Response.json(
-          { error: "File is already being processed" },
-          { status: 400 }
-        );
-      }
-      // Retry the job
-      const job = await jobQueue.add(
-        "file-process",
-        JSON.stringify({
-          fileId: file[0].fileId,
-          userId: file[0].userId,
-          filePath: file[0].path,
-        }),
-        {
-          attempts: 3,
-          backoff: {
-            type: "exponential",
-            delay: 1000,
-          },
-        }
-      );
-      // Update the file record with the new job ID
-      await db
-        .update(docsSchema)
-        .set({
-          jobId: job.id,
-          status: "pending",
-          updated_at: new Date().toISOString(),
-        })
-        .where(eq(docsSchema.id, file[0].fileId));
-      console.log("Files queued for processing:", job.id);
+      // const existingJob = await jobQueue.getJob(file[0].jobId);
+      // if (existingJob) {
+      //   return Response.json(
+      //     { error: "File is already being processed" },
+      //     { status: 400 }
+      //   );
+      // }
+      // // Retry the job
+      // const job = await jobQueue.add(
+      //   "file-process",
+      //   JSON.stringify({
+      //     fileId: file[0].fileId,
+      //     userId: file[0].userId,
+      //     filePath: file[0].path,
+      //   }),
+      //   {
+      //     attempts: 3,
+      //     backoff: {
+      //       type: "exponential",
+      //       delay: 1000,
+      //     },
+      //   }
+      // );
+      // // Update the file record with the new job ID
+      // await db
+      //   .update(docsSchema)
+      //   .set({
+      //     jobId: job.id,
+      //     status: "pending",
+      //     updated_at: new Date().toISOString(),
+      //   })
+      //   .where(eq(docsSchema.id, file[0].fileId));
+      // console.log("Files queued for processing:", job.id);
       return Response.json({
         message: "File processing retried successfully",
-        jobId: job.id,
+        // jobId: job.id,
       });
     } catch (error) {
       console.error("Error retrying file processing:", error);
@@ -340,7 +321,6 @@ export class Routes {
         .select({
           path: docsSchema.path,
           userId: docsSchema.user_id,
-          jobId: docsSchema.jobId,
         })
         .from(docsSchema)
         .where(eq(docsSchema.id, fileId))
@@ -374,11 +354,6 @@ export class Routes {
 
       // Optionally delete the file from the database
       // await db.delete(docsSchema).where(eq(docsSchema.id, fileId));
-
-      // Optionally delete job from the queue
-
-      const job = await jobQueue.remove(file[0].jobId);
-      console.log(`Job ${file[0].jobId} removed from the queue`);
 
       return Response.json({
         message: "File deleted successfully",
@@ -520,3 +495,6 @@ Your primary purpose is to make Priyanshu's personal information and learning ma
 
 import { sql } from "drizzle-orm";
 import { getVectorStore } from "./lib/vector-store";
+import { UPLOAD_DIR } from "@/comman/constants";
+import { retry } from "./lib/retry";
+import { processFile } from "./lib/processor";

@@ -2,6 +2,9 @@
 node_modules
 uploads/
 drizzle/
+user_data/
+caix_user/
+
 
 *.db
 
